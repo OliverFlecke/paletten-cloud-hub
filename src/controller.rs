@@ -1,22 +1,42 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
 use rumqttc::v5::{
     mqttbytes::{
         v5::{Packet, Publish},
-        QoS::ExactlyOnce,
+        QoS::{self, ExactlyOnce},
     },
     AsyncClient,
     Event::{Incoming, Outgoing},
     EventLoop, MqttOptions,
 };
+use strum::AsRefStr;
 
 const MQTT_ID: &str = "paletten-cloud-hub";
 const MQTT_HOST: &str = "mqtt.oliverflecke.me";
 const MQTT_PORT: u16 = 1883;
 
+lazy_static! {
+    static ref HEATERS: Vec<Heater> = vec![
+        Heater {
+            id: "C4402D".to_string(),
+            name: "Spisebord".to_string(),
+        },
+        Heater {
+            id: "C431FB".to_string(),
+            name: "Sofa".to_string(),
+        },
+        Heater {
+            id: "10DB9C".to_string(),
+            name: "Soveværelse".to_string(),
+        },
+    ];
+}
+
 #[derive(Debug, Default)]
 struct State {
+    enabled: bool,
     desired_temperature: Option<f64>,
     current_temperature: Option<f64>,
 }
@@ -72,9 +92,25 @@ impl Controller {
                         .to_string()
                         .parse::<f64>()
                         .context("Failed to parse temperature to float")?;
-                    self.set_desired_temperature(desired_temperature).await;
+                    self.set_desired_temperature(desired_temperature).await?;
                 }
-                _ if topic.as_ref().starts_with(b"temperature/") => {}
+                b"temperature/inside" => {
+                    let temperature = payload
+                        .escape_ascii()
+                        .to_string()
+                        .parse::<f64>()
+                        .context("Failed to parse temperature to float")?;
+                    self.set_inside_temperature(temperature).await?;
+                }
+                b"temperature/auto" if payload.as_ref() == b"true" => {
+                    tracing::info!(state = ?self.state, "Temperature control enabled");
+                    self.state.enabled = true;
+                }
+                b"temperature/auto" if payload.as_ref() == b"false" => {
+                    tracing::info!(state = ?self.state, "Temperature control disabled");
+                    self.state.enabled = false;
+                }
+
                 _ => {}
             }
         } else {
@@ -84,49 +120,80 @@ impl Controller {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
-    async fn set_desired_temperature(&mut self, temperature: f64) {
+    /// Track the latest temperature received.
+    #[tracing::instrument(skip(self), fields(state = ?self.state))]
+    async fn set_inside_temperature(&mut self, temperature: f64) -> Result<()> {
+        self.state.current_temperature = Some(temperature);
+        self.check_temperature().await?;
+        Ok(())
+    }
+
+    /// Set the desired temperature for the controller.
+    #[tracing::instrument(skip(self), fields(state = ?self.state))]
+    async fn set_desired_temperature(&mut self, temperature: f64) -> Result<()> {
         self.state.desired_temperature = Some(temperature);
-        self.check_temperature().await;
+        self.check_temperature().await?;
+        Ok(())
     }
 
     /// Check the current temperature against the desired temperature and
     /// update the heaters as needed.
-    #[tracing::instrument(skip(self))]
-    async fn check_temperature(&mut self) {
+    #[tracing::instrument(skip(self), fields(state = ?self.state))]
+    async fn check_temperature(&mut self) -> Result<()> {
+        if !self.state.enabled {
+            tracing::info!(state = ?self.state, "Controller is disabled");
+            return Ok(());
+        }
+
         let Some(desired_temperature) = self.state.desired_temperature else {
-            tracing::warn!("Missing desired temperature");
-            return;
+            tracing::warn!(state = ?self.state, "Missing desired temperature");
+            return Ok(());
         };
         let Some(current_temperature) = self.state.current_temperature else {
-            tracing::warn!("Missing current temperature");
-            return;
+            tracing::warn!(state = ?self.state, "Missing current temperature");
+            return Ok(());
         };
 
-        if let Err(e) = self
-            .set_heaters_state(if desired_temperature < current_temperature {
-                HeaterState::On
-            } else {
-                HeaterState::Off
-            })
-            .await
-        {
-            tracing::error!(error = ?e, "Failed to set heater state");
-        }
+        self.set_heaters_state(if desired_temperature > current_temperature {
+            HeaterState::On
+        } else {
+            HeaterState::Off
+        })
+        .await
+        .context("Failed to set heater state")
     }
 
     /// Set the heaters to either on or off.
     #[tracing::instrument(skip(self))]
     async fn set_heaters_state(&mut self, state: HeaterState) -> Result<()> {
-        // TODO: Publish message to mqtt to turn on heathers.
+        for heater in HEATERS.iter() {
+            self.client
+                .publish(
+                    format!("shellies/shelly1-{}/relay/0/command", heater.id),
+                    QoS::AtLeastOnce,
+                    true,
+                    state.to_string(),
+                )
+                .await
+                .context("Failed to publish to MQTT")?;
+        }
 
         Ok(())
     }
 }
 
 /// Describes the states a heater can be on.
-#[derive(Debug)]
+#[derive(Debug, AsRefStr, strum::Display)]
 enum HeaterState {
+    #[strum(serialize = "off")]
     Off,
+    #[strum(serialize = "on")]
     On,
+}
+
+#[derive(Debug)]
+struct Heater {
+    #[allow(unused)]
+    name: String,
+    id: String,
 }

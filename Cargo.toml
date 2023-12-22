@@ -1,0 +1,13 @@
+[package]
+name = "paletten-cloud-hub"
+version = "0.1.0"
+edition = "2021"
+authors = ["Oliver Fleckenstein <oliverfl@live.dk>"]
+
+[dependencies]
+anyhow = "1.0.76"
+rumqttc = "0.23.0"
+tokio = { version = "1.35.1", features = ["rt", "macros", "rt-multi-thread"] }
+tracing = "0.1.40"
+tracing-bunyan-formatter = "0.3.9"
+tracing-subscriber = "0.3.18"

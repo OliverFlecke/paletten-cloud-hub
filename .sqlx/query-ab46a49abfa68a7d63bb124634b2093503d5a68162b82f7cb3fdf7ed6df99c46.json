@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM history WHERE timestamp > date('now', '-1 day')",
+  "describe": {
+    "columns": [
+      {
+        "name": "timestamp",
+        "ordinal": 0,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "location",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "temperature",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "humidity",
+        "ordinal": 3,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ab46a49abfa68a7d63bb124634b2093503d5a68162b82f7cb3fdf7ed6df99c46"
+}

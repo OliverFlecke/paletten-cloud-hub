@@ -11,7 +11,8 @@ use rumqttc::v5::{
     Event::{Incoming, Outgoing},
     EventLoop, MqttOptions,
 };
-use strum::AsRefStr;
+
+use crate::models::{Heater, HeaterState};
 
 const MQTT_ID: &str = "paletten-cloud-hub";
 const MQTT_HOST: &str = "mqtt.oliverflecke.me";
@@ -19,18 +20,9 @@ const MQTT_PORT: u16 = 1883;
 
 lazy_static! {
     static ref HEATERS: Vec<Heater> = vec![
-        Heater {
-            id: "C4402D".to_string(),
-            name: "Spisebord".to_string(),
-        },
-        Heater {
-            id: "C431FB".to_string(),
-            name: "Sofa".to_string(),
-        },
-        Heater {
-            id: "10DB9C".to_string(),
-            name: "Soveværelse".to_string(),
-        },
+        Heater::new("C4402D".to_string(), "Spisebord".to_string()),
+        Heater::new("C431FB".to_string(), "Sofa".to_string()),
+        Heater::new("10DB9C".to_string(), "Soveværelse".to_string()),
     ];
 }
 
@@ -169,7 +161,7 @@ impl Controller {
         for heater in HEATERS.iter() {
             self.client
                 .publish(
-                    format!("shellies/shelly1-{}/relay/0/command", heater.id),
+                    format!("shellies/shelly1-{}/relay/0/command", heater.id()),
                     QoS::AtLeastOnce,
                     true,
                     state.to_string(),
@@ -180,20 +172,4 @@ impl Controller {
 
         Ok(())
     }
-}
-
-/// Describes the states a heater can be on.
-#[derive(Debug, AsRefStr, strum::Display)]
-enum HeaterState {
-    #[strum(serialize = "off")]
-    Off,
-    #[strum(serialize = "on")]
-    On,
-}
-
-#[derive(Debug)]
-struct Heater {
-    #[allow(unused)]
-    name: String,
-    id: String,
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO heater_history (timestamp, shelly_id, is_active) VALUES (current_timestamp, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9323f98aac9b81209ad8ef73021bf81992c0d4ac9b0820bbb152e05023d22790"
+}

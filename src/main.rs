@@ -1,6 +1,9 @@
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    sync::Arc,
+};
 
-use tokio::task::JoinError;
+use tokio::{sync::Mutex, task::JoinError};
 
 use crate::controller::Controller;
 
@@ -18,12 +21,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting hub");
 
     // let db_connection_string = "sqlite:paletten.sqlite";
-    let db_connection_string = "sqlite:tmp.sqlite";
-    let mut database = db::Database::new(db_connection_string).await?;
-    let data = database.get_history_from_last_24_hours().await?;
-    tracing::debug!("{data:?}");
+    let db_connection_string = "sqlite:data/tmp.sqlite";
+    let database = Arc::new(Mutex::new(db::Database::new(db_connection_string).await?));
 
-    let controller = Controller::new().await;
+    let controller = Controller::new(controller::create_mqtt_handler(), database);
+
     let controller_task = tokio::spawn(controller.run_until_completion());
     let signal_task = tokio::signal::ctrl_c();
 

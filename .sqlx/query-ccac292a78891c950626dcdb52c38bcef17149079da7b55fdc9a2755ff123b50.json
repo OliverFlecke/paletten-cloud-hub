@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO history(timestamp, location, temperature, humidity) VALUES (current_timestamp, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ccac292a78891c950626dcdb52c38bcef17149079da7b55fdc9a2755ff123b50"
+}

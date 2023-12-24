@@ -10,9 +10,10 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 # Everything until now should be cached as long as dependency tree is the same.
 COPY . .
+ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
 
-FROM scratch
+FROM alpine:latest
 COPY --from=builder /app/target/release/paletten-cloud-hub app
-ENTRYPOINT ["./app"]
+ENTRYPOINT ["/app"]

@@ -1,8 +1,28 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use sqlx::{Connection, SqliteConnection};
 
 use crate::models::HeaterState;
+
+#[async_trait]
+#[cfg_attr(test, mockall::automock)]
+pub trait TemperatureDatabase: Send + std::fmt::Debug {
+    /// Get the history of temperatures for the last 24 hours.
+    async fn get_history_from_last_24_hours(&mut self)
+        -> Result<Vec<TemperatureMeasurementRecord>>;
+
+    /// Insert a temperature measurement into the database.
+    async fn insert_reading(
+        &mut self,
+        location: &str,
+        temperature: i64,
+        humidity: i64,
+    ) -> Result<()>;
+
+    /// Record a state for a given heater.
+    async fn insert_heater_state(&mut self, heater_id: &str, state: HeaterState) -> Result<()>;
+}
 
 /// Represents the layer to the database.
 #[derive(Debug)]
@@ -22,12 +42,16 @@ impl Database {
 
         Ok(Self { connection })
     }
+}
 
-    /// Get the history of temperatures for the last 24 hours.
+#[async_trait]
+impl TemperatureDatabase for Database {
     #[tracing::instrument(skip(self))]
-    pub async fn get_history_from_last_24_hours(&mut self) -> Result<Vec<TemperatureMeasurement>> {
+    async fn get_history_from_last_24_hours(
+        &mut self,
+    ) -> Result<Vec<TemperatureMeasurementRecord>> {
         sqlx::query_as!(
-            TemperatureMeasurement,
+            TemperatureMeasurementRecord,
             "SELECT * FROM history WHERE timestamp > date('now', '-1 day')"
         )
         .fetch_all(&mut self.connection)
@@ -35,15 +59,18 @@ impl Database {
         .context("Failed to fetch history of time measurements")
     }
 
-    /// Insert a temperature measurement into the database.
     #[tracing::instrument(skip(self))]
-    pub async fn insert_reading(&mut self, measurement: &TemperatureMeasurement) -> Result<()> {
+    async fn insert_reading(
+        &mut self,
+        location: &str,
+        temperature: i64,
+        humidity: i64,
+    ) -> Result<()> {
         sqlx::query!(
-            "INSERT INTO history(timestamp, location, temperature, humidity) VALUES (?, ?, ?, ?)",
-            measurement.timestamp,
-            measurement.location,
-            measurement.temperature,
-            measurement.humidity
+            "INSERT INTO history(timestamp, location, temperature, humidity) VALUES (current_timestamp, ?, ?, ?)",
+            location,
+            temperature,
+            humidity
         )
         .execute(&mut self.connection)
         .await
@@ -52,9 +79,8 @@ impl Database {
         Ok(())
     }
 
-    /// Record a state for a given heater.
     #[tracing::instrument(skip(self))]
-    pub async fn insert_heater_state(&mut self, heater_id: &str, state: HeaterState) -> Result<()> {
+    async fn insert_heater_state(&mut self, heater_id: &str, state: HeaterState) -> Result<()> {
         sqlx::query!("INSERT INTO heater_history (timestamp, shelly_id, is_active) VALUES (current_timestamp, ?, ?)", heater_id, state)
             .execute(&mut self.connection).await.context("Failed to insert heater history")?;
 
@@ -63,7 +89,7 @@ impl Database {
 }
 
 #[derive(Debug)]
-pub struct TemperatureMeasurement {
+pub struct TemperatureMeasurementRecord {
     timestamp: NaiveDateTime,
     location: String,
     temperature: i64,
@@ -71,7 +97,7 @@ pub struct TemperatureMeasurement {
 }
 
 #[derive(Debug)]
-pub struct HeaterHistory {
+pub struct HeaterHistoryRecord {
     timestamp: NaiveDateTime,
     shelly_id: String,
     is_active: bool,

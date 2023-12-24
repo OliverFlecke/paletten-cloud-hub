@@ -22,3 +22,9 @@ impl Heater {
         Self { id, name }
     }
 }
+
+#[derive(Debug, serde::Deserialize, Getters)]
+pub struct Measurement {
+    temperature: f64,
+    humidity: f64,
+}

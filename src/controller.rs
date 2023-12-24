@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -91,6 +91,7 @@ impl Controller {
     }
 
     /// Handle incoming message.
+    #[tracing::instrument(skip(self, message))]
     async fn handle_incoming_message(&mut self, message: Packet) -> Result<()> {
         if let Packet::Publish(Publish { topic, payload, .. }) = message {
             match topic.as_ref() {
@@ -115,7 +116,8 @@ impl Controller {
                         .await?;
                 }
                 _ if topic.as_ref().starts_with(b"shellies/") => {
-                    tracing::debug!("From `{:?}` received command: {:?}", topic, payload);
+                    self.handle_heater_state_change(topic.as_ref(), payload.as_ref())
+                        .await?;
                 }
 
                 _ => {}
@@ -183,7 +185,6 @@ impl Controller {
     /// Handle receiving a measurement reading.
     #[tracing::instrument(skip(self, topic, payload))]
     async fn handle_measurement(&mut self, topic: &[u8], payload: &[u8]) -> Result<()> {
-        tracing::trace!("Receved {:?} => {:?}", topic, payload);
         let re = regex::bytes::Regex::new(r#"measurement/(?<place>inside|outside)"#)
             .expect("invalid regex");
         let Some(place) = re
@@ -211,6 +212,35 @@ impl Controller {
                 *measurement.temperature() as i64,
                 *measurement.humidity() as i64,
             )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Handle messages published about state changes to heaters.
+    #[tracing::instrument(skip(self, topic, payload))]
+    async fn handle_heater_state_change(&mut self, topic: &[u8], payload: &[u8]) -> Result<()> {
+        let re = regex::bytes::Regex::new(r#"shellies/shelly1-(?<id>[A-F0-9]{6})/relay/0"#)
+            .expect("invalid regex");
+        let Some(heater_id) = re
+            .captures(topic.as_ref())
+            .and_then(|m| m.name("id"))
+            .and_then(|x| std::str::from_utf8(x.as_bytes()).ok())
+        else {
+            return Err(anyhow!("Received state from unknown heater: '{:?}'", topic));
+        };
+
+        let Ok(state) = std::str::from_utf8(payload)
+            .context("payload is not utf8")
+            .and_then(|s| HeaterState::from_str(s).context("payload is not a valid state"))
+        else {
+            return Err(anyhow!("Invalid state received: {:?}", payload));
+        };
+
+        self.db
+            .lock()
+            .await
+            .insert_heater_state(heater_id, state)
             .await?;
 
         Ok(())

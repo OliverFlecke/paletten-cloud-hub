@@ -88,6 +88,8 @@ impl TemperatureDatabase for Database {
     }
 }
 
+// Allowing unused code for now, as we want to have a struct representing the database records.
+#[allow(unused)]
 #[derive(Debug)]
 pub struct TemperatureMeasurementRecord {
     timestamp: NaiveDateTime,
@@ -96,6 +98,7 @@ pub struct TemperatureMeasurementRecord {
     humidity: i64,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct HeaterHistoryRecord {
     timestamp: NaiveDateTime,

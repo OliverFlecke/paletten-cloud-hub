@@ -1,7 +1,7 @@
 use derive_getters::Getters;
 
 /// Describes the states a heater can be on.
-#[derive(Debug, strum::AsRefStr, strum::Display, sqlx::Type)]
+#[derive(Debug, strum::AsRefStr, strum::EnumString, strum::Display, sqlx::Type)]
 #[repr(u8)]
 pub enum HeaterState {
     #[strum(serialize = "off")]

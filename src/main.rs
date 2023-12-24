@@ -20,8 +20,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting hub");
 
-    // let db_connection_string = "sqlite:paletten.sqlite";
-    let db_connection_string = "sqlite:data/tmp.sqlite";
+    let db_connection_string = "sqlite:data/paletten.sqlite";
     let database = Arc::new(Mutex::new(db::Database::new(db_connection_string).await?));
 
     let controller = Controller::new(controller::create_mqtt_handler(), database);

@@ -11,4 +11,6 @@ CREATE TABLE IF NOT EXISTS heater_history (
     shelly_id TEXT NOT NULL,
     is_active BOOLEAN NOT NULL
 );
-CREATE INDEX IF NOT EXISTS heater_history_timestamp_index ON heater_history (timestamp);
+CREATE INDEX IF NOT EXISTS heater_history_timestamp_index ON heater_history (
+    timestamp
+);

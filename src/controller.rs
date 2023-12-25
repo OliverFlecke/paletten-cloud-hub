@@ -12,14 +12,21 @@ use rumqttc::v5::{
     Event::{Incoming, Outgoing},
     EventLoop, MqttOptions,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender},
+    Mutex,
+};
 
 use crate::{
     db::Database,
     models::{Heater, HeaterState, Measurement},
 };
 
+#[cfg(debug_assertions)]
+const MQTT_ID: &str = "paletten-cloud-hub-dev";
+#[cfg(not(debug_assertions))]
 const MQTT_ID: &str = "paletten-cloud-hub";
+
 const MQTT_HOST: &str = "mqtt.oliverflecke.me";
 const MQTT_PORT: u16 = 1883;
 
@@ -32,6 +39,7 @@ lazy_static! {
 }
 
 type MqttHandler = (AsyncClient, EventLoop);
+type AsyncDatabase = Arc<Mutex<Database>>;
 
 /// Create a mqtt handler with the default broker and configuration.
 pub fn create_mqtt_handler() -> MqttHandler {
@@ -41,45 +49,71 @@ pub fn create_mqtt_handler() -> MqttHandler {
     AsyncClient::new(mqtt_options, 10)
 }
 
+pub async fn create(
+    mqtt_client: AsyncClient,
+    mqtt_eventloop: EventLoop,
+    db: AsyncDatabase,
+) -> Result<(Controller, Executor)> {
+    let (tx, rx) = channel::<Action>(10);
+    mqtt_client
+        .subscribe_many([
+            Filter::new("temperature/+", ExactlyOnce),
+            Filter::new("measurement/+", ExactlyOnce),
+            Filter::new("shellies/+/relay/0", ExactlyOnce),
+        ])
+        .await
+        .context("Failed to subscribe to topics")?;
+
+    let controller = Controller::new(mqtt_eventloop, tx);
+    let executor = Executor::new(mqtt_client, db, rx);
+
+    Ok((controller, executor))
+}
+
+/// An action recevied from the controller.
+#[derive(Debug, Clone)]
+pub enum Action {
+    SetDesiredTemperature(f64),
+    SetInsideTemperature(f64),
+    EnableController(bool),
+    RegisterMeasurement(String, Measurement),
+    RegisterHeaterStateChange(String, HeaterState),
+}
+
 /// Struct to listen and adjust heater state based on a desired state.
 pub struct Controller {
-    client: AsyncClient,
     eventloop: EventLoop,
     state: State,
-    db: Arc<Mutex<Database>>,
+    tx: Sender<Action>,
 }
 
 impl Controller {
-    pub fn new((client, eventloop): MqttHandler, db: Arc<Mutex<Database>>) -> Self {
+    pub fn new(eventloop: EventLoop, tx: Sender<Action>) -> Self {
         Self {
-            client,
             eventloop,
             state: State::default(),
-            db,
+            tx,
         }
     }
 
     /// Execute the controllers loop until completion. Run as a `Future` that
     /// must be polled. Best used with `tokio::spawn`.
     pub async fn run_until_completion(mut self) -> Result<()> {
-        self.client
-            .subscribe_many([
-                Filter::new("temperature/+", ExactlyOnce),
-                Filter::new("measurement/+", ExactlyOnce),
-                Filter::new("shellies/+/relay/0", ExactlyOnce),
-            ])
-            .await
-            .context("Failed to subscribe to topics")?;
-
         loop {
             match self.eventloop.poll().await {
                 Ok(notification) => {
                     match notification {
-                        Incoming(incoming) => {
-                            if let Err(e) = self.handle_incoming_message(incoming).await {
+                        Incoming(incoming) => match self.handle_incoming_message(incoming).await {
+                            Ok(Some(action)) => {
+                                if let Err(e) = self.tx.send(action).await {
+                                    tracing::error!(error = %e, "Failed to send action");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
                                 tracing::error!(error = %e, "Error when handling incomming message");
                             }
-                        }
+                        },
 
                         // Do nothing for outgoing requests
                         Outgoing(_) => {}
@@ -92,83 +126,168 @@ impl Controller {
 
     /// Handle incoming message.
     #[tracing::instrument(skip(self, message))]
-    async fn handle_incoming_message(&mut self, message: Packet) -> Result<()> {
+    async fn handle_incoming_message(&mut self, message: Packet) -> Result<Option<Action>> {
         if let Packet::Publish(Publish { topic, payload, .. }) = message {
             match topic.as_ref() {
                 b"temperature/set" => {
                     let desired_temperature = parse_float_payload(&payload)?;
-                    self.set_desired_temperature(desired_temperature).await?;
+                    Ok(Some(Action::SetDesiredTemperature(desired_temperature)))
                 }
                 b"temperature/inside" => {
                     let temperature = parse_float_payload(&payload)?;
-                    self.set_inside_temperature(temperature).await?;
+                    Ok(Some(Action::SetInsideTemperature(temperature)))
                 }
                 b"temperature/auto" if payload.as_ref() == b"true" => {
                     tracing::info!(state = ?self.state, "Temperature control enabled");
                     self.state.enabled = true;
+                    Ok(Some(Action::EnableController(true)))
                 }
                 b"temperature/auto" if payload.as_ref() == b"false" => {
                     tracing::info!(state = ?self.state, "Temperature control disabled");
                     self.state.enabled = false;
+                    Ok(Some(Action::EnableController(false)))
                 }
                 _ if topic.as_ref().starts_with(b"measurement/") => {
-                    self.handle_measurement(topic.as_ref(), payload.as_ref())
+                    let (place, measurement) = self
+                        .parse_measurement(topic.as_ref(), payload.as_ref())
                         .await?;
+                    Ok(Some(Action::RegisterMeasurement(place, measurement)))
                 }
                 _ if topic.as_ref().starts_with(b"shellies/") => {
-                    self.handle_heater_state_change(topic.as_ref(), payload.as_ref())
+                    let (heater_id, state) = self
+                        .parse_heater_state_change_message(topic.as_ref(), payload.as_ref())
                         .await?;
+                    Ok(Some(Action::RegisterHeaterStateChange(heater_id, state)))
                 }
 
-                _ => {}
+                _ => Ok(None),
             }
         } else {
             tracing::trace!(incoming = ?message, "Unhandled incoming message");
+            Ok(None)
+        }
+    }
+
+    /// Handle receiving a measurement reading.
+    #[tracing::instrument(skip(self, topic, payload))]
+    async fn parse_measurement(
+        &mut self,
+        topic: &[u8],
+        payload: &[u8],
+    ) -> Result<(String, Measurement)> {
+        let re = regex::bytes::Regex::new(r#"measurement/(?<place>inside|outside)"#)
+            .expect("invalid regex");
+        let place = re
+            .captures(topic.as_ref())
+            .and_then(|m| m.name("place"))
+            .and_then(|x| std::str::from_utf8(x.as_bytes()).ok())
+            .ok_or_else(|| anyhow!("Received measurement from unknown place: '{:?}'", topic))?;
+
+        let measurement = serde_json::from_slice::<Measurement>(payload)
+            .map_err(|e| anyhow!("Failed to deserialize payload: {payload:?}. {e:?}"))?;
+
+        Ok((place.to_string(), measurement))
+    }
+
+    /// Handle messages published about state changes to heaters.
+    #[tracing::instrument(skip(self, topic, payload))]
+    async fn parse_heater_state_change_message(
+        &mut self,
+        topic: &[u8],
+        payload: &[u8],
+    ) -> Result<(String, HeaterState)> {
+        let re = regex::bytes::Regex::new(r#"shellies/shelly1-(?<id>[A-F0-9]{6})/relay/0"#)
+            .expect("invalid regex");
+        let heater_id = re
+            .captures(topic.as_ref())
+            .and_then(|m| m.name("id"))
+            .and_then(|x| std::str::from_utf8(x.as_bytes()).ok())
+            .ok_or_else(|| anyhow!("Received state from unknown heater: '{:?}'", topic))?;
+        let state = std::str::from_utf8(payload)
+            .context("payload is not utf8")
+            .and_then(|s| HeaterState::from_str(s).context("payload is not a valid state"))?;
+
+        Ok((heater_id.to_string(), state))
+    }
+}
+
+/// An executor to handle the events being received and update the state.
+#[derive(Debug)]
+pub struct Executor {
+    state: State,
+    mqtt_client: AsyncClient,
+    rx: Receiver<Action>,
+    db: Arc<Mutex<Database>>,
+}
+
+impl Executor {
+    pub fn new(mqtt_client: AsyncClient, db: Arc<Mutex<Database>>, rx: Receiver<Action>) -> Self {
+        Self {
+            state: State::default(),
+            mqtt_client,
+            db,
+            rx,
+        }
+    }
+
+    /// Run the executor until completion.
+    pub async fn run_until_completion(mut self) -> Result<()> {
+        while let Some(action) = self.rx.recv().await {
+            tracing::debug!("Received action: {action:?}");
+            if let Err(e) = self.handle_action(&action).await {
+                tracing::error!(error = %e, action = ?action, "Failed to handle action");
+            }
         }
 
         Ok(())
     }
 
-    /// Track the latest temperature received.
-    #[tracing::instrument(skip(self), fields(state = ?self.state))]
-    async fn set_inside_temperature(&mut self, temperature: f64) -> Result<()> {
-        self.state.current_temperature = Some(temperature);
-        self.check_temperature().await?;
-        Ok(())
-    }
-
-    /// Set the desired temperature for the controller.
-    #[tracing::instrument(skip(self), fields(state = ?self.state))]
-    async fn set_desired_temperature(&mut self, temperature: f64) -> Result<()> {
-        self.state.desired_temperature = Some(temperature);
-        self.check_temperature().await?;
-        Ok(())
-    }
-
-    /// Check the current temperature against the desired temperature and
-    /// update the heaters as needed.
-    #[tracing::instrument(skip(self), fields(state = ?self.state))]
-    async fn check_temperature(&mut self) -> Result<()> {
-        if !self.state.enabled {
-            tracing::info!(state = ?self.state, "Controller is disabled");
-            return Ok(());
+    /// Handle an action received through the subscribed channel.
+    #[tracing::instrument(skip(self))]
+    async fn handle_action(&mut self, action: &Action) -> Result<()> {
+        use Action::*;
+        match action {
+            SetDesiredTemperature(temp) => {
+                self.state.desired_temperature = Some(*temp);
+                self.check_temperature().await?;
+            }
+            SetInsideTemperature(temp) => {
+                self.state.current_temperature = Some(*temp);
+                self.check_temperature().await?;
+            }
+            EnableController(enabled) => {
+                tracing::info!(state = ?self.state, "Temperature control enabled: {enabled}");
+                self.state.enabled = *enabled;
+                self.check_temperature().await?;
+            }
+            RegisterMeasurement(place, measurement) => {
+                self.db
+                    .lock()
+                    .await
+                    .insert_reading(
+                        place,
+                        *measurement.temperature() as i64,
+                        *measurement.humidity() as i64,
+                    )
+                    .await?;
+            }
+            RegisterHeaterStateChange(heater_id, state) => {
+                self.db
+                    .lock()
+                    .await
+                    .insert_heater_state(heater_id, *state)
+                    .await?;
+            }
         }
 
-        let Some(heater_state) = self.state.get_heater_state() else {
-            tracing::warn!(state = ?self.state, "Missing desired or current temperature");
-            return Ok(());
-        };
-
-        self.set_heaters_state(heater_state)
-            .await
-            .context("Failed to set heater state")
+        Ok(())
     }
 
     /// Set the heaters to either on or off.
     #[tracing::instrument(skip(self))]
-    async fn set_heaters_state(&mut self, state: HeaterState) -> Result<()> {
+    async fn set_heaters_state(&self, state: HeaterState) -> Result<()> {
         for heater in HEATERS.iter() {
-            self.client
+            self.mqtt_client
                 .publish(
                     format!("shellies/shelly1-{}/relay/0/command", heater.id()),
                     QoS::AtLeastOnce,
@@ -182,68 +301,23 @@ impl Controller {
         Ok(())
     }
 
-    /// Handle receiving a measurement reading.
-    #[tracing::instrument(skip(self, topic, payload))]
-    async fn handle_measurement(&mut self, topic: &[u8], payload: &[u8]) -> Result<()> {
-        let re = regex::bytes::Regex::new(r#"measurement/(?<place>inside|outside)"#)
-            .expect("invalid regex");
-        let Some(place) = re
-            .captures(topic.as_ref())
-            .and_then(|m| m.name("place"))
-            .and_then(|x| std::str::from_utf8(x.as_bytes()).ok())
-        else {
-            return Err(anyhow!(
-                "Received measurement from unknown place: '{:?}'",
-                topic
-            ));
+    /// Check the current temperature against the desired temperature and
+    /// update the heaters as needed.
+    #[tracing::instrument(skip(self), fields(state = ?self.state))]
+    async fn check_temperature(&self) -> Result<()> {
+        if !self.state.enabled {
+            tracing::info!(state = ?self.state, "Controller is disabled");
+            return Ok(());
+        }
+
+        let Some(heater_state) = self.state.get_heater_state() else {
+            tracing::warn!(state = ?self.state, "Missing desired or current temperature");
+            return Ok(());
         };
 
-        let Ok(measurement) = serde_json::from_slice::<Measurement>(payload) else {
-            return Err(anyhow!("Failed to deserialize payload: {:?}", payload));
-        };
-
-        tracing::info!("{} => {:?}", place, measurement);
-
-        self.db
-            .lock()
+        self.set_heaters_state(heater_state)
             .await
-            .insert_reading(
-                place,
-                *measurement.temperature() as i64,
-                *measurement.humidity() as i64,
-            )
-            .await?;
-
-        Ok(())
-    }
-
-    /// Handle messages published about state changes to heaters.
-    #[tracing::instrument(skip(self, topic, payload))]
-    async fn handle_heater_state_change(&mut self, topic: &[u8], payload: &[u8]) -> Result<()> {
-        let re = regex::bytes::Regex::new(r#"shellies/shelly1-(?<id>[A-F0-9]{6})/relay/0"#)
-            .expect("invalid regex");
-        let Some(heater_id) = re
-            .captures(topic.as_ref())
-            .and_then(|m| m.name("id"))
-            .and_then(|x| std::str::from_utf8(x.as_bytes()).ok())
-        else {
-            return Err(anyhow!("Received state from unknown heater: '{:?}'", topic));
-        };
-
-        let Ok(state) = std::str::from_utf8(payload)
-            .context("payload is not utf8")
-            .and_then(|s| HeaterState::from_str(s).context("payload is not a valid state"))
-        else {
-            return Err(anyhow!("Invalid state received: {:?}", payload));
-        };
-
-        self.db
-            .lock()
-            .await
-            .insert_heater_state(heater_id, state)
-            .await?;
-
-        Ok(())
+            .context("Failed to set heater state")
     }
 }
 

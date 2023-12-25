@@ -15,7 +15,7 @@ use rumqttc::v5::{
 use tokio::sync::Mutex;
 
 use crate::{
-    db::TemperatureDatabase,
+    db::Database,
     models::{Heater, HeaterState, Measurement},
 };
 
@@ -46,11 +46,11 @@ pub struct Controller {
     client: AsyncClient,
     eventloop: EventLoop,
     state: State,
-    db: Arc<Mutex<dyn TemperatureDatabase>>,
+    db: Arc<Mutex<Database>>,
 }
 
 impl Controller {
-    pub fn new((client, eventloop): MqttHandler, db: Arc<Mutex<dyn TemperatureDatabase>>) -> Self {
+    pub fn new((client, eventloop): MqttHandler, db: Arc<Mutex<Database>>) -> Self {
         Self {
             client,
             eventloop,

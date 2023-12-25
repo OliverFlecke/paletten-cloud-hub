@@ -75,6 +75,7 @@ impl Database {
 // Allowing unused code for now, as we want to have a struct representing the database records.
 #[allow(unused)]
 #[derive(Debug)]
+#[cfg_attr(test, derive(sqlx::FromRow))]
 pub struct TemperatureMeasurementRecord {
     timestamp: NaiveDateTime,
     location: String,
@@ -111,13 +112,14 @@ mod test {
             .expect("inserting reading not to fail");
 
         // Assert
-        let results = sqlx::query!("select * from history")
+        let results = sqlx::query_as::<_, TemperatureMeasurementRecord>("select * from history")
             .fetch_all(&pool)
             .await
             .expect("query failed");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].location, location);
-        assert_eq!(results[0].temperature, temperature);
-        assert_eq!(results[0].humidity, humidity);
+        let row = results.get(0).unwrap();
+        assert_eq!(row.location, location);
+        assert_eq!(row.temperature, temperature);
+        assert_eq!(row.humidity, humidity);
     }
 }

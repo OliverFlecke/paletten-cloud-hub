@@ -5,8 +5,6 @@ use std::{
 
 use tokio::{sync::Mutex, task::JoinError};
 
-use crate::controller::Controller;
-
 mod controller;
 mod db;
 pub mod models;
@@ -20,16 +18,22 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting hub");
 
-    let db_connection_string = "sqlite:data/paletten.sqlite";
-    let database = Arc::new(Mutex::new(db::Database::new(db_connection_string).await?));
+    let database = {
+        let db_connection_string = "sqlite:data/paletten.sqlite";
+        let db_pool = db::create_db_pool(db_connection_string).await?;
+        Arc::new(Mutex::new(db::Database::new(db_pool).await?))
+    };
 
-    let controller = Controller::new(controller::create_mqtt_handler(), database);
+    let (mqtt_client, mqtt_eventloop) = controller::create_mqtt_handler();
+    let (controller, executor) = controller::create(mqtt_client, mqtt_eventloop, database).await?;
 
     let controller_task = tokio::spawn(controller.run_until_completion());
+    let executor_task = tokio::spawn(executor.run_until_completion());
     let signal_task = tokio::signal::ctrl_c();
 
     tokio::select! {
         result = controller_task => report_exit("controller", result),
+        result = executor_task => report_exit("executor", result),
         result = signal_task => report_exit("closed by user", Ok(result)),
     };
 

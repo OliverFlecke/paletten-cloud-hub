@@ -1,0 +1,104 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_VERSION: 0.7.1
+  SQLX_FEATURES: "rustls,sqlite"
+
+# Each job runs in a runner environment specified by runs-on
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache Action
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlx-${{ env.SQLX_VERSION }}
+
+      - name: Install sqlx-cli
+        run:
+            cargo install sqlx-cli
+            --version=${{ env.SQLX_VERSION }}
+            --features ${{ env.SQLX_FEATURES }}
+            --no-default-features
+            --locked
+
+      - name: Check sqlx offline cache is up-to-date
+        run: |
+          export DATABASE_URL=sqlite:temp_db.sqlite
+          sqlx database create
+          sqlx migrate run
+          cargo sqlx prepare --check -- --bin paletten-cloud-hub
+
+      - name: Run tests
+        run: cargo test
+
+  # `fmt` container job
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Enforce formatting
+        run: cargo fmt --check
+
+  # `clippy` container job
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlx-${{ env.SQLX_VERSION }}
+      - name: Linting
+        run: cargo clippy -- -D warnings
+
+  # `coverage` container job
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlx-${{ env.SQLX_VERSION }}
+      - name: cargo install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: cargo generate-lockfile
+        if: hashFiles('Cargo.lock') == ''
+        uses: actions-rs/cargo@v1
+        with:
+          command: generate-lockfile
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v3
+        with:
+          fail_ci_if_error: true

@@ -39,7 +39,10 @@ jobs:
 
       - name: Check sqlx offline cache is up-to-date
         run: |
-          cargo sqlx prepare --database-url sqlite::memory: --check -- --bin paletten-cloud-hub
+          export DATABASE_URL=sqlite:temp_db.sqlite
+          sqlx database create
+          sqlx migrate run
+          cargo sqlx prepare --check -- --bin paletten-cloud-hub
 
       - name: Run tests
         run: cargo test

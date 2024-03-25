@@ -11,7 +11,7 @@ repos:
     - id: check-added-large-files
     - id: mixed-line-ending
 - repo: https://github.com/sqlfluff/sqlfluff
-  rev: 3.0.0a4
+  rev: 3.0.3
   hooks:
     - id: sqlfluff-fix
       args: ["--dialect", "sqlite"]
@@ -22,7 +22,7 @@ repos:
       name: cargo fmt
     - id: cargo-check
 - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
-  rev: v9.10.0
+  rev: v9.13.0
   hooks:
   - id: commitlint
     stages: [commit-msg]
